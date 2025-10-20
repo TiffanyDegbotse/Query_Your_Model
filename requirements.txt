@@ -1,0 +1,11 @@
+numpy==1.26.4
+pandas==2.2.2
+scikit-learn==1.4.2
+shap==0.45.0
+fastapi==0.115.0
+uvicorn==0.30.6
+python-multipart==0.0.9
+streamlit==1.39.0
+pydantic==2.9.2
+joblib==1.4.2
+matplotlib==3.9.2
