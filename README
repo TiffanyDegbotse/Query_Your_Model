@@ -1,1 +1,16 @@
-#README
+# Chat with Your Model — Retrieval-Augmented Interpretability (RAI)
+
+**Goal:** Interactively query a trained ML model, see **local explanations** (SHAP), and retrieve **similar reasoning cases** from a reasoning-vector index. Supports both **feature-space** and **reasoning-space** (SHAP) similarity with a tunable weight `alpha`.
+
+## Features
+- Upload any scikit-learn compatible `.pkl` model
+- On-demand SHAP (Tree/Linear/Kernel fallback)
+- File-based reasoning store (features + SHAP vectors)
+- Retrieval: `similarity = α·cosine(SHAP) + (1−α)·cosine(features)`
+- Streamlit UI + optional FastAPI
+
+## Setup
+```bash
+python -m venv .venv && source .venv/bin/activate  # (Windows: .venv\Scripts\activate)
+pip install -r requirements.txt
+
