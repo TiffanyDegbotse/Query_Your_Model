@@ -1,0 +1,426 @@
+import re
+import json
+import math
+import matplotlib.pyplot as plt
+import streamlit as st
+import requests
+from openai import OpenAI
+
+st.set_page_config(page_title="Chat with Your Model", page_icon="💬", layout="wide")
+st.title("💬 Chat with Your Model")
+
+# ----------------------------------
+# Sidebar configuration
+# ----------------------------------
+with st.sidebar:
+    st.header("Settings")
+    api_url = st.text_input("FastAPI endpoint", value="http://127.0.0.1:8000/explain")
+    model_path = st.text_input("Model path", value="Query_Your_Model/model_data/model.pkl")
+    feat_names_str = st.text_input(
+        "Feature names (comma-separated)",
+        value="sepal length (cm),sepal width (cm),petal length (cm),petal width (cm)"
+    )
+    namespace = st.text_input("Namespace", value="Query_Your_Model/data/base_indices/iris_global")
+    alpha = st.slider("Alpha (retrieval weight)", 0.0, 1.0, 0.7, 0.05)
+    k = st.slider("Top-K similar to retrieve", 1, 10, 5)
+
+feat_names = [s.strip() for s in feat_names_str.split(",")]
+
+# OpenAI client (set OPENAI_API_KEY in .streamlit/secrets.toml)
+client = OpenAI(api_key="")
+
+# ------------------------------------------------
+# Helpers
+# ------------------------------------------------
+def label_from_pred(y_pred):
+    try:
+        num = int(round(float(y_pred)))
+        mapping = {0: "setosa", 1: "versicolor", 2: "virginica"}
+        return mapping.get(num, str(y_pred))
+    except Exception:
+        return str(y_pred)
+
+def safe_topk_list(res):
+    return res.get("explanation", {}).get("topk", []) or []
+
+def safe_similar_cases(res):
+    return res.get("similar_cases", []) or []
+
+def summarize_prediction(res):
+    pred = res["prediction"]["y_pred"]
+    proba = res["prediction"]["proba"]
+    label = label_from_pred(pred)
+    return f"🌸 The model predicts **{label}** (class `{pred}`) with confidence **{proba:.2f}**."
+
+def show_similar_cases(res, n_display, feat_names):
+    sims = safe_similar_cases(res)
+    if not sims: 
+        return "No similar cases were retrieved."
+    n = min(n_display, len(sims))
+    lines = [f"It found **{len(sims)}** similar past cases (showing **{n}**):"]
+    for case in sims[:n]:
+        features_named = ", ".join([f"{name} = {val:.2f}" for name, val in zip(feat_names, case["features"])])
+        lines.append(f"- **{case['case_id']}** → {features_named}, predicted as **{case['y_pred']}**.")
+    return "\n".join(lines)
+
+def plot_shap_bar(topk):
+    if not topk:
+        st.write("No SHAP details available for this prediction.")
+        return
+    feats = [f["feature"] for f in topk]
+    shap_vals = [f["shap"] for f in topk]
+    fig, ax = plt.subplots()
+    ax.barh(feats, shap_vals)  # default colors per instructions
+    ax.set_xlabel("SHAP value (impact on prediction)")
+    ax.set_title("Feature importance for this prediction")
+    st.pyplot(fig)
+
+def explain_in_words(res, n_display, feat_names):
+    pred = res["prediction"]["y_pred"]
+    proba = res["prediction"]["proba"]
+    label = label_from_pred(pred)
+    topk = safe_topk_list(res)
+
+    msg = [
+        f"🌸 Based on these features, the model thinks it's **{label}** (class `{pred}`) with confidence **{proba:.2f}**.\n",
+        "### Key reasons (SHAP):"
+    ]
+
+    if topk:
+        for f in topk:
+            effect = "increased" if f["shap"] > 0 else "decreased"
+            msg.append(
+                f"- **{f['feature']} = {f['value']:.2f}** → {effect} the prediction "
+                f"(impact **{abs(f['shap']):.2f}**)."
+            )
+    else:
+        msg.append("- No SHAP details available.")
+
+    sims = safe_similar_cases(res)
+    if sims:
+        n = min(n_display, len(sims))
+        msg.append(f"\n### Similar cases (showing {n} of {len(sims)})")
+        for case in sims[:n]:
+            features_named = ", ".join([f"{name} = {val:.2f}" for name, val in zip(feat_names, case["features"])])
+            msg.append(f"- **{case['case_id']}** → {features_named}, predicted as **{case['y_pred']}**.")
+
+    st.markdown("\n".join(msg))
+    plot_shap_bar(topk)
+
+def llm_explain(res, feat_names, extra_context=None):
+    """LLM explanation: can handle 'why' and 'what-if' using the provided context (old/new)."""
+    try:
+        pred = label_from_pred(res["prediction"]["y_pred"])
+        proba = res["prediction"]["proba"]
+        topk = safe_topk_list(res)
+        sims = safe_similar_cases(res)
+
+        base_prompt = {
+            "prediction": pred,
+            "probability": round(proba, 3),
+            "topk": topk,
+            "similar_examples_sample": sims[:3],
+            "extra_context": extra_context or {}
+        }
+
+        prompt = (
+            "You are an explainability copilot. Explain to a non-technical user.\n\n"
+            f"DATA:\n{json.dumps(base_prompt, indent=2)}\n\n"
+            "Write a short, clear answer that covers:\n"
+            "- Why the model made the prediction\n"
+            "- Which features mattered\n"
+        )
+
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"⚠️ LLM explanation failed: {e}"
+
+def interpret_question(user_q):
+    q = (user_q or "").lower()
+    if any(w in q for w in ["what if", "increase", "decrease", "set ", "make ", "higher", "lower", "raise", "reduce", "change"]):
+        return "what_if"
+    if any(w in q for w in ["why", "explain", "reason"]):
+        return "explain"
+    if "similar" in q:
+        return "similar"
+    return "summary"
+
+def perform_api_call(features):
+    payload = {
+        "model_path": model_path,
+        "feature_names": feat_names,
+        "features": features,
+        "namespace": namespace,
+        "retrieval": {"alpha": alpha, "k": k, "use_retrieval": True, "namespace": namespace},
+    }
+    return requests.post(api_url, json=payload).json()
+
+# --- What-if parsing ---
+
+FEATURE_NAME_PAT = re.compile(r"([a-zA-Z][a-zA-Z0-9 _\-\(\)]*)")
+
+def match_feature_name(fragment, feat_names):
+    """Best-effort fuzzy match: choose feature with max token overlap (case-insensitive)."""
+    frag = fragment.strip().lower()
+    best, best_score = None, -1
+    for name in feat_names:
+        n = name.lower()
+        score = sum(tok in n for tok in re.findall(r"[a-z0-9]+", frag))
+        if score > best_score:
+            best, best_score = name, score
+    return best if best_score > 0 else None
+
+def parse_numeric(val_str):
+    try:
+        return float(val_str)
+    except:
+        return None
+
+def default_delta(curr):
+    # 10% of current value (min 0.1 abs) as a sensible default tweak
+    base = abs(curr) * 0.10
+    return base if base >= 0.1 else (0.1 if curr >= 0 else -0.1)
+
+def apply_what_if(user_q, feat_names, current_features):
+    """
+    Returns (new_features, change_text) or (None, error_msg)
+    Supports:
+      - "what if petal length (cm) = 2.5"
+      - "set sepal width to 3.8"
+      - "increase petal width by 0.2"
+      - "decrease sepal length by 10%"
+      - "make petal length higher" (uses default +10%)
+      - "make petal width lower"  (uses default -10%)
+    """
+    q = user_q.lower()
+
+    # 1) Direct set: "= X" or "to X"
+    m = re.search(r"(?:set|what if|change)\s+(.*?)\s*(?:=|to)\s*([-+]?\d*\.?\d+)", q)
+    if m:
+        feat_frag, val_str = m.group(1), m.group(2)
+        fname = match_feature_name(feat_frag, feat_names)
+        if fname is None: 
+            return None, f"Couldn't identify which feature to set from: '{feat_frag}'."
+        val = parse_numeric(val_str)
+        if val is None:
+            return None, f"Couldn't parse a number from: '{val_str}'."
+        new = current_features.copy()
+        idx = feat_names.index(fname)
+        new[idx] = val
+        return new, f"Set **{fname}** to **{val:.2f}**."
+
+    # 2) increase/decrease by absolute amount: "increase X by 0.2"
+    m = re.search(r"(increase|decrease|raise|reduce)\s+(.*?)\s+by\s+([-+]?\d*\.?\d+)\b(?!%)", q)
+    if m:
+        op, feat_frag, val_str = m.groups()
+        fname = match_feature_name(feat_frag, feat_names)
+        if fname is None:
+            return None, f"Couldn't identify which feature to adjust from: '{feat_frag}'."
+        delta = parse_numeric(val_str)
+        if delta is None:
+            return None, f"Couldn't parse a number from: '{val_str}'."
+        if op in ["decrease", "reduce"]:
+            delta = -abs(delta)
+        else:
+            delta = abs(delta)
+        new = current_features.copy()
+        idx = feat_names.index(fname)
+        new_val = new[idx] + delta
+        new[idx] = new_val
+        return new, f"{'Increased' if delta>0 else 'Decreased'} **{fname}** by **{abs(delta):.2f}** → **{new_val:.2f}**."
+
+    # 3) increase/decrease by percent: "decrease X by 10%"
+    m = re.search(r"(increase|decrease|raise|reduce)\s+(.*?)\s+by\s+([-+]?\d*\.?\d+)\s*%", q)
+    if m:
+        op, feat_frag, perc_str = m.groups()
+        fname = match_feature_name(feat_frag, feat_names)
+        if fname is None:
+            return None, f"Couldn't identify which feature to adjust from: '{feat_frag}'."
+        perc = parse_numeric(perc_str)
+        if perc is None:
+            return None, f"Couldn't parse a percentage from: '{perc_str}'."
+        new = current_features.copy()
+        idx = feat_names.index(fname)
+        factor = 1.0 + (abs(perc)/100.0 if op in ["increase","raise"] else -abs(perc)/100.0)
+        new_val = new[idx] * factor
+        new[idx] = new_val
+        return new, f"{op.title()}d **{fname}** by **{abs(perc):.0f}%** → **{new_val:.2f}**."
+
+    # 4) make X higher/lower (no amount) → default ±10%
+    m = re.search(r"(make|set)?\s*(.*?)\s*(higher|lower|increase|decrease|raise|reduce)", q)
+    if m:
+        _, feat_frag, direction = m.groups()
+        fname = match_feature_name(feat_frag, feat_names)
+        if fname is None:
+            return None, f"Couldn't identify which feature to adjust from: '{feat_frag}'."
+        idx = feat_names.index(fname)
+        base_delta = default_delta(current_features[idx])
+        delta = base_delta if direction in ["higher", "increase", "raise"] else -abs(base_delta)
+        new = current_features.copy()
+        new_val = new[idx] + delta
+        new[idx] = new_val
+        verb = "Increased" if delta>0 else "Decreased"
+        return new, f"{verb} **{fname}** by **{abs(delta):.2f}** (default) → **{new_val:.2f}**."
+
+    return None, "I couldn’t parse the change. Try: `what if petal length = 2.5`, `increase sepal width by 0.2`, or `decrease petal width by 10%`."
+
+# ------------------------------------------------
+# Step 1: Enter features & predict
+# ------------------------------------------------
+st.subheader("Step 1 – Enter features to generate a prediction")
+user_features = st.text_input("Enter feature values (comma-separated)", "")
+predict_btn = st.button("🔍 Predict and Explain")
+
+if "prediction_result" not in st.session_state:
+    st.session_state["prediction_result"] = None
+    st.session_state["messages"] = []
+    st.session_state["input_features"] = None
+
+if predict_btn:
+    try:
+        features = [float(x.strip()) for x in user_features.split(",") if x.strip()]
+        if len(features) != len(feat_names):
+            st.warning(f"⚠️ Expected {len(feat_names)} values ({', '.join(feat_names)}), but got {len(features)}.")
+        else:
+            st.session_state["input_features"] = features
+            # Show entered features
+            st.markdown("### ✨ Entered Features")
+            st.markdown("\n".join([f"- **{n}** = {v:.2f}" for n, v in zip(feat_names, features)]))
+            # Call API
+            res = perform_api_call(features)
+            st.session_state["prediction_result"] = res
+            st.session_state["messages"] = []
+            st.success(summarize_prediction(res))
+            st.info("Scroll down to explore similar cases or chat 👇")
+    except Exception as e:
+        st.error(f"⚠️ Error contacting API: {e}")
+
+# ------------------------------------------------
+# Step 2: Similar cases
+# ------------------------------------------------
+if st.session_state["prediction_result"]:
+    st.divider()
+    st.subheader("Step 2 – Explore similar cases")
+    res = st.session_state["prediction_result"]
+    sims = safe_similar_cases(res)
+    total_cases = len(sims)
+
+    if total_cases > 0:
+        options = [str(i) for i in range(1, total_cases + 1)] + ["All"]
+        chosen = st.selectbox(f"The model found {total_cases} similar cases. How many to view?", options)
+        n_display = total_cases if chosen == "All" else int(chosen)
+        st.markdown(f"### Showing {n_display} of {total_cases} similar cases:")
+        for i, case in enumerate(sims[:n_display], start=1):
+            features_named = ", ".join([f"{n} = {v:.2f}" for n, v in zip(feat_names, case["features"])])
+            st.markdown(f"**Case {i} — {case['case_id']}**  \n{features_named}  \n**Predicted as:** {case['y_pred']}")
+    else:
+        st.write("No similar cases retrieved.")
+
+    # ------------------------------------------------
+    # Step 3: Explanation Mode + Chat
+    # ------------------------------------------------
+    st.divider()
+    st.subheader("Step 3 – Chat with the model about this prediction")
+
+    # Choose explanation mode BEFORE asking questions
+    if "chat_mode" not in st.session_state:
+        st.session_state["chat_mode"] = "System (SHAP-based)"
+    st.session_state["chat_mode"] = st.radio(
+        "How should explanations be generated?",
+        ["System (SHAP-based)", "LLM (Natural language)"],
+        index=0 if "System" in st.session_state["chat_mode"] else 1,
+        horizontal=True,
+    )
+
+    # Show previous messages
+    for role, content in st.session_state["messages"]:
+        with st.chat_message(role):
+            st.markdown(content)
+
+    # Chat input
+    if user_q := st.chat_input("Ask e.g. 'Why this prediction?' or 'Increase petal length by 0.3' or 'set sepal width to 3.8'"):
+        st.session_state["messages"].append(("user", user_q))
+        with st.chat_message("user"):
+            st.markdown(user_q)
+
+        intent = interpret_question(user_q)
+
+        # Current base result
+        base_res = st.session_state["prediction_result"]
+        base_pred = base_res["prediction"]["y_pred"]
+        base_proba = base_res["prediction"]["proba"]
+        base_label = label_from_pred(base_pred)
+
+        if intent == "explain":
+            if "LLM" in st.session_state["chat_mode"]:
+                with st.spinner("💡 Generating LLM explanation..."):
+                    answer = llm_explain(base_res, feat_names)
+                st.session_state["messages"].append(("assistant", answer))
+                with st.chat_message("assistant"):
+                    st.markdown(answer)
+            else:
+                with st.chat_message("assistant"):
+                    explain_in_words(base_res, total_cases, feat_names)
+                st.session_state["messages"].append(("assistant", "✅ System explanation shown above."))
+
+        elif intent == "similar":
+            text = show_similar_cases(base_res, total_cases, feat_names)
+            st.session_state["messages"].append(("assistant", text))
+            with st.chat_message("assistant"):
+                st.markdown(text)
+
+        elif intent == "what_if":
+            # Parse & apply change, recompute, compare
+            if st.session_state["input_features"] is None:
+                msg = "Please run a prediction first (Step 1) so I know your starting feature values."
+                st.session_state["messages"].append(("assistant", msg))
+                with st.chat_message("assistant"):
+                    st.markdown(msg)
+            else:
+                new_feats, status = apply_what_if(user_q, feat_names, st.session_state["input_features"])
+                if new_feats is None:
+                    st.session_state["messages"].append(("assistant", status))
+                    with st.chat_message("assistant"):
+                        st.markdown(status)
+                else:
+                    with st.spinner("🔁 Recomputing with your change..."):
+                        new_res = perform_api_call(new_feats)
+
+                    new_pred = new_res["prediction"]["y_pred"]
+                    new_proba = new_res["prediction"]["proba"]
+                    new_label = label_from_pred(new_pred)
+
+                    if "LLM" in st.session_state["chat_mode"]:
+                        ctx = {
+                            "change_applied": status,
+                            "before": {"features": st.session_state["input_features"], "label": base_label, "proba": base_proba},
+                            "after": {"features": new_feats, "label": new_label, "proba": new_proba}
+                        }
+                        with st.spinner("💡 Summarizing the effect with LLM..."):
+                            answer = llm_explain(new_res, feat_names, extra_context=ctx)
+                        st.session_state["messages"].append(("assistant", answer))
+                        with st.chat_message("assistant"):
+                            st.markdown(answer)
+                    else:
+                        # System comparison summary + new SHAP chart
+                        lines = [
+                            f"**Change applied:** {status}",
+                            f"**Before:** {base_label} (class `{base_pred}`) — confidence **{base_proba:.2f}**",
+                            f"**After:** {new_label} (class `{new_pred}`) — confidence **{new_proba:.2f}**",
+                        ]
+                        with st.chat_message("assistant"):
+                            st.markdown("\n\n".join(lines))
+                            st.markdown("**New explanation (SHAP) for the changed input:**")
+                            explain_in_words(new_res, len(safe_similar_cases(new_res)), feat_names)
+                        st.session_state["messages"].append(("assistant", "What-if comparison + SHAP shown above."))
+
+        else:
+            # Summary fallback
+            summary = summarize_prediction(base_res)
+            st.session_state["messages"].append(("assistant", summary))
+            with st.chat_message("assistant"):
+                st.markdown(summary)
