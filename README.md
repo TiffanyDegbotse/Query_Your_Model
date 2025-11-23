@@ -11,7 +11,7 @@ This project implements an end-to-end framework for interacting with machine lea
 Query_Your_Model/  
 ├── app/  
 │   ├── api_fastapi.py — FastAPI backend: /explain endpoint  
-│   └── ui_streamlit.py — Streamlit chat-like UI  
+│   └── app_chat.py — Streamlit chat-like UI  
 ├── core/  
 │   ├── model_loader.py — load_model(), predict()  
 │   ├── explain.py — explain_instance(): SHAP explainer & top-k attribution logic  
