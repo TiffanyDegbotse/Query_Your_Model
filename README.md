@@ -40,6 +40,6 @@ Query_Your_Model/
 Start the FastAPI backend with `uvicorn Query_Your_Model.app.api_fastapi:app --reload`.  
 API runs at `http://127.0.0.1:8000` and the `/explain` endpoint can be tested from the Swagger UI at `/docs`.  
 
-Launch the Streamlit UI with `streamlit run Query_Your_Model/app/ui_streamlit.py`.  
+Launch the Streamlit UI with `streamlit run app/ui_streamlit.py`.  
 The UI runs at `http://localhost:8501`.  
 
