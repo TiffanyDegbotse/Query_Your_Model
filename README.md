@@ -1,4 +1,4 @@
-# Query Your Model — Retrieval-Augmented Explainability
+# Query Your Model
 
 This project implements an end-to-end framework for interacting with machine learning models through natural-language–style queries. It combines FastAPI (for backend explainability services), Streamlit (for a conversational UI), and explainability methods like SHAP with retrieval-augmented reasoning to make predictions more transparent and interpretable. The system allows you to upload a trained model, input feature values for a new instance, generate explanations using SHAP feature attributions, retrieve similar past reasoning cases for context, and interact with the model via a simple chat-style interface.
 
