@@ -6,8 +6,10 @@ import streamlit as st
 import requests
 from openai import OpenAI
 
+#titles
 st.set_page_config(page_title="Chat with Your Model", page_icon="💬", layout="wide")
 st.title("💬 Chat with Your Model")
+
 
 # ----------------------------------
 # Sidebar configuration
