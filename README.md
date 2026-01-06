@@ -5,7 +5,7 @@ This project implements an end-to-end framework for interacting with machine lea
 ##  Features
 - FastAPI backend (`/explain` endpoint): loads a scikit-learn model, generates predictions and probabilities, computes SHAP explanations for the input instance, and retrieves top-K similar cases using cosine similarity over SHAP + feature vectors.  
 - Streamlit UI: sidebar for uploading models, providing feature names, and configuring retrieval; main panel for conversational “chat” with the model; displays predictions, SHAP feature importance, bar plots, and similar cases.  
-- Retrieval-Augmented Explainability: cases are stored in local indices (`features.npy`, `shap.npy`, `meta.jsonl`) and top-K reasoning cases are retrieved using weighted cosine similarity.  
+- Retrieval-Augmented Explainability: cases are stored in local indices (`features.npy`, `shap.npy`, `meta.jsonl`) and top-K reasoning cases are retrieved using weighted cosine similarity. 
 
 ##  Repository Layout
 Query_Your_Model/  
